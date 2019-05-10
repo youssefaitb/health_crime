@@ -1,0 +1,195 @@
+---
+title: "Regression discontinuity design"
+author: "Y.A.B."
+date: "5/6/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, error = TRUE, dpi=300)
+```
+
+```{r packages, cache=F, message=F}
+pacman::p_load(sf, tidyverse, hrbrthemes, lubridate, DBI, dbplyr, bigrquery, here, estimatr, lubridate, MonteCarlo)
+pacman::p_install(rms, force=F)
+pacman::p_load(ggplot2)
+theme_set(theme_ipsum())
+pacman::p_load(rddtools)
+```
+## ATE, ATT, LATE
+
+## a) Discuss why the ATE, ATT and LATE can each be important from a policy or economics perspective, and also how they are distinclty different. 
+
+The average treatment effect compares outcomes with and without treatment for the whole population. 
+The local average treatment effect also compares outcomes with and without treatment but is conditional on some characteristic x.
+The average treatment on the treated compares outcome with treatment and without treatment, exclusively for the treated group. 
+
+Policy can potentially care about all and any of these three measures. Naturally, policymakers care about the average treatment effect on the treated group. They might, however, also care about the other two measures. If a policy is targeted towards a certain group, the ATE might still be relevant if we expect spillovers/externalities on those who are not treated. The LATE might also be relevant in cases where the policymaker cares about how the treatment might interact with other characteristics. 
+
+
+## b) Simulating treatment : 
+
+**Generating data**
+
+``` {r}
+ind = 
+    data.frame( 
+    i = 1:10000, 
+    ei = rnorm(length(1:10000), mean = 0, sd=1),
+    Y_pre = rnorm(length(1:10000), mean = 3, sd = 2),
+    Y_treated = rnorm(length(1:10000), mean = 5, sd = 20),
+    Y_untreated = rnorm(length(1:10000), mean = 3, sd = 2),
+    X = rep(0:1, each = 10000/2)
+    )
+ind <- ind%>% mutate(Yobs = ifelse( X == 1, Y_treated, Y_untreated))
+```
+
+
+**Let's measure the ATE** 
+
+``` {r}
+ind$ATE <- ind$Y_treated- ind$Y_untreated  
+mean(ind$ATE)
+```
+
+**Let's measure the ATT**
+
+``` {r}
+ATT <- ind %>% group_by(X) %>% summarise (ATT = mean(ATE))
+ATT[2,2]
+
+```
+
+**Let's look at the observed sample mean differences** 
+
+```{r}
+obs <- ind %>% group_by(X) %>% summarise (diff_treated = mean(Y_treated-Y_pre), diff_untreated=mean(Y_untreated-Y_pre))
+observed_difference <- obs[2,2]-obs[1,3]
+observed_difference
+``` 
+
+**Comparison:**  
+
+**The observed sample mean difference is close to the average treatment on the treated. This is happening in this simulation because I have designed the average treatment on the untreated to be 0.** 
+ 
+
+## Replication exercise
+
+## Reading the file 
+
+```{r}
+raw <- read.csv(file="bac.csv", header=TRUE, sep=",") %>% arrange(bac)
+head(raw)
+raw$bac <- as.numeric(raw$bac)
+```
+
+## a) Histogram 
+```{r}
+disc <- qplot(raw$bac, 
+      geom = "histogram", 
+      binwidth = 0.001, 
+      main = "BAC distribution", 
+      xlab = "BAC", 
+      fill = I("black"),
+      col = I("grey"), 
+      alpha = I(.2),
+      xlim = c(0, 0.440)
+)
+disc + geom_vline (xintercept = 0.08 , color = "blue", size = 0.3) + geom_vline (xintercept = 0.15, color = "blue", size = 0.3)
+```
+
+**There appears to be sorting at the 0.08 threshold as we can see a significant spike on the right of the threshold.** 
+
+
+## b) Checking sorting for other variables 
+```{r}
+raw$threshold <-  as.numeric (raw$bac >=0.08 )
+raw$resc_bac <- raw$bac-0.08
+str(raw)
+raw$acc <- as.numeric(raw$acc)
+raw$aged <- as.numeric(raw$aged)
+raw$male <- as.numeric(raw$male)
+raw$white <- as.numeric(raw$white)
+
+rd_model_age <- lm(aged ~ threshold + resc_bac + I(threshold * resc_bac), data = raw)
+summary(rd_model_age) 
+
+rd_model_acc <- lm(acc ~ threshold + resc_bac + I(threshold * resc_bac), data = raw)
+summary(rd_model_acc) 
+
+rd_model_male <- lm(male ~ threshold + resc_bac + I(threshold * resc_bac), data = raw)
+summary(rd_model_male) 
+
+rd_model_white <- lm(white ~ threshold + resc_bac + I(threshold * resc_bac), data = raw)
+summary(rd_model_white) 
+
+```
+
+**The only variables for which the threshold appears to be significant is age. Therefore, I run a more miticulous RD regression with bandwidth specification below.** 
+
+```{r}
+frame <- rdd_data(y=raw$age, x=raw$bac, cutpoint = 0.08)
+reg_para <- rdd_reg_lm(rdd_object = frame, bw= 0.05)
+reg_para
+```
+
+**The results of this regression show that there is in fact no sorting at the threshold.** 
+
+## c) Running the RD
+
+```{r}
+raw.05 <- raw[ which(raw$resc_bac < 0.05 & raw$resc_bac > -0.05), ]
+raw.05$recidivism <- as.numeric(raw.05$recidivism)
+rd_model_recid <- lm(recidivism ~ threshold + resc_bac + I(threshold * resc_bac), data = raw.05)
+summary(rd_model_recid) 
+
+graph <- raw %>% group_by(resc_bac) %>% summarise (avrecid = mean(recidivism)) 
+
+graph3 <- ggplot(graph, aes(x = resc_bac, y =avrecid)) + geom_point() + theme(axis.text.x= element_text(size=7, angle=90)) + scale_x_continuous(name ="BAC (centered around 0.08", limits=c(-0.05,0.13)) + scale_y_continuous(name="Average recidivism", limits=c(0,1))+ geom_vline (xintercept = 0 , color = "blue", size = 0.3)
+
+graph3
+
+```
+**The coefficient is highly significant, and close to the estimate in the paper (-0.021). I failed to reproduce the graph from the paper and settled for this one, because trying to replicate the paper's graph kept coming out funky.**
+
+## d) Testing sensitivity to bandwidth
+
+```{r, declare RDD data set-up}
+frame <- rdd_data(y=raw$recidivism, x=raw$bac, cutpoint = 0.08)
+reg_para <- rdd_reg_lm(rdd_object = frame, bw= 0.05)
+reg_para
+sensitivity_table <- plotSensi(reg_para, from = 0.01, to= 0.07, by = 0.005, output = c("data"), plot = FALSE, order = 1)
+sensitivity_table
+sensitivity_graph <- plotSensi(reg_para, from = 0.01, to= 0.07, by = 0.005, output = c("ggplot"), plot = TRUE, order = 1)
+```
+**The confidence interval above indicates that the direction of the relation is not sensitive to the bandwidth choice (unless the bandwidth choice is extremely small or less than 0.01).** 
+
+## e) Testing the design: randomization inference 
+
+```{r}
+set.seed(42)
+n <- 92158
+nsims <- 1000
+
+coeff_sims <- c()
+t_sims <- c()
+
+for(i in 1:nsims){
+  resc_bac_sim <- sample(x = raw.05$resc_bac, size = n)
+  frame2 <- rdd_data(y=raw.05$recidivism, x=resc_bac_sim, cutpoint = 0)
+  model2 <- rdd_reg_lm(rdd_object = frame2)
+  coeff_sims[i] <- summary(model2)$coefficients[2,1]
+  t_sims[i] <- summary(model2)$coefficients[2,4]
+}
+
+summary(coeff_sims)
+summary(t_sims)
+
+ri_p_value_raw <- mean( abs(coeff_sims) >= abs(summary(reg_para)$coefficients[2, 1]))
+ri_p_value_raw
+```
+**There's no evidence of experimental design bias. As per the p-value above, the estimated placebo never exceeds the estimated treatment effect.** 
+
+
+
+**THE END**
